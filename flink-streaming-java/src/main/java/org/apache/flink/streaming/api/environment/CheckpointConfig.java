@@ -20,7 +20,8 @@ package org.apache.flink.streaming.api.environment;
 
 import org.apache.flink.annotation.Public;
 import org.apache.flink.annotation.PublicEvolving;
-import org.apache.flink.runtime.jobgraph.JobStatus;
+import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.CheckpointingMode;
 
 import org.slf4j.Logger;
@@ -75,6 +76,11 @@ public class CheckpointConfig implements java.io.Serializable {
 	/** Flag to force checkpointing in iterative jobs. */
 	private boolean forceCheckpointing;
 
+	/** Flag to enable unaligned checkpoints. */
+	private boolean unalignedCheckpointsEnabled;
+
+	private long alignmentTimeout = ExecutionCheckpointingOptions.ALIGNMENT_TIMEOUT.defaultValue().toMillis();
+
 	/** Cleanup behaviour for persistent checkpoints. */
 	private ExternalizedCheckpointCleanup externalizedCheckpointCleanup;
 
@@ -97,7 +103,39 @@ public class CheckpointConfig implements java.io.Serializable {
 	 * */
 	private int tolerableCheckpointFailureNumber = UNDEFINED_TOLERABLE_CHECKPOINT_NUMBER;
 
+	/**
+	 * Creates a deep copy of the provided {@link CheckpointConfig}.
+	 * @param checkpointConfig the config to copy.
+	 */
+	public CheckpointConfig(final CheckpointConfig checkpointConfig) {
+		checkNotNull(checkpointConfig);
+
+		this.checkpointInterval = checkpointConfig.checkpointInterval;
+		this.checkpointingMode = checkpointConfig.checkpointingMode;
+		this.checkpointTimeout = checkpointConfig.checkpointTimeout;
+		this.maxConcurrentCheckpoints = checkpointConfig.maxConcurrentCheckpoints;
+		this.minPauseBetweenCheckpoints = checkpointConfig.minPauseBetweenCheckpoints;
+		this.preferCheckpointForRecovery = checkpointConfig.preferCheckpointForRecovery;
+		this.tolerableCheckpointFailureNumber = checkpointConfig.tolerableCheckpointFailureNumber;
+		this.unalignedCheckpointsEnabled = checkpointConfig.isUnalignedCheckpointsEnabled();
+		this.alignmentTimeout = checkpointConfig.alignmentTimeout;
+		this.externalizedCheckpointCleanup = checkpointConfig.externalizedCheckpointCleanup;
+		this.forceCheckpointing = checkpointConfig.forceCheckpointing;
+		this.tolerableCheckpointFailureNumber = checkpointConfig.tolerableCheckpointFailureNumber;
+	}
+
+	public CheckpointConfig() {
+
+	}
+
 	// ------------------------------------------------------------------------
+
+	/**
+	 * Disables checkpointing.
+	 */
+	public void disableCheckpointing() {
+		this.checkpointInterval = -1;
+	}
 
 	/**
 	 * Checks whether checkpointing is enabled.
@@ -378,6 +416,71 @@ public class CheckpointConfig implements java.io.Serializable {
 	}
 
 	/**
+	 * Enables unaligned checkpoints, which greatly reduce checkpointing times under backpressure.
+	 *
+	 * <p>Unaligned checkpoints contain data stored in buffers as part of the checkpoint state, which allows
+	 * checkpoint barriers to overtake these buffers. Thus, the checkpoint duration becomes independent of the
+	 * current throughput as checkpoint barriers are effectively not embedded into the stream of data anymore.
+	 *
+	 * <p>Unaligned checkpoints can only be enabled if {@link #checkpointingMode} is
+	 * {@link CheckpointingMode#EXACTLY_ONCE}.
+	 *
+	 * @param enabled Flag to indicate whether unaligned are enabled.
+	 */
+	@PublicEvolving
+	public void enableUnalignedCheckpoints(boolean enabled) {
+		unalignedCheckpointsEnabled = enabled;
+	}
+
+	/**
+	 * Enables unaligned checkpoints, which greatly reduce checkpointing times under backpressure.
+	 *
+	 * <p>Unaligned checkpoints contain data stored in buffers as part of the checkpoint state, which allows
+	 * checkpoint barriers to overtake these buffers. Thus, the checkpoint duration becomes independent of the
+	 * current throughput as checkpoint barriers are effectively not embedded into the stream of data anymore.
+	 *
+	 * <p>Unaligned checkpoints can only be enabled if {@link #checkpointingMode} is
+	 * {@link CheckpointingMode#EXACTLY_ONCE}.
+	 */
+	@PublicEvolving
+	public void enableUnalignedCheckpoints() {
+		enableUnalignedCheckpoints(true);
+	}
+
+	/**
+	 * Returns whether unaligned checkpoints are enabled.
+	 *
+	 * @return <code>true</code> if unaligned checkpoints are enabled.
+	 */
+	@PublicEvolving
+	public boolean isUnalignedCheckpointsEnabled() {
+		return unalignedCheckpointsEnabled;
+	}
+
+	/**
+	 * Only relevant if {@link #unalignedCheckpointsEnabled} is enabled.
+	 *
+	 * <p>If {@link #alignmentTimeout} has value equal to <code>0</code>, checkpoints will always start unaligned.
+	 *
+	 * <p>If {@link #alignmentTimeout} has value greater then <code>0</code>, checkpoints will start aligned.
+	 * If during checkpointing, checkpoint start delay exceeds this {@link #alignmentTimeout}, alignment
+	 * will timeout and checkpoint will start working as unaligned checkpoint.
+	 */
+	@PublicEvolving
+	public void setAlignmentTimeout(long alignmentTimeout) {
+		this.alignmentTimeout = alignmentTimeout;
+	}
+
+	/**
+	 * @return value of alignment timeout, as configured via {@link #setAlignmentTimeout(long)} or
+	 * {@link ExecutionCheckpointingOptions#ALIGNMENT_TIMEOUT}.
+	 */
+	@PublicEvolving
+	public long getAlignmentTimeout() {
+		return alignmentTimeout;
+	}
+
+	/**
 	 * Returns the cleanup behaviour for externalized checkpoints.
 	 *
 	 * @return The cleanup behaviour for externalized checkpoints or
@@ -435,5 +538,38 @@ public class CheckpointConfig implements java.io.Serializable {
 		public boolean deleteOnCancellation() {
 			return deleteOnCancellation;
 		}
+	}
+
+	/**
+	 * Sets all relevant options contained in the {@link ReadableConfig} such as e.g.
+	 * {@link ExecutionCheckpointingOptions#CHECKPOINTING_MODE}.
+	 *
+	 * <p>It will change the value of a setting only if a corresponding option was set in the
+	 * {@code configuration}. If a key is not present, the current value of a field will remain
+	 * untouched.
+	 *
+	 * @param configuration a configuration to read the values from
+	 */
+	public void configure(ReadableConfig configuration) {
+		configuration.getOptional(ExecutionCheckpointingOptions.CHECKPOINTING_MODE)
+			.ifPresent(this::setCheckpointingMode);
+		configuration.getOptional(ExecutionCheckpointingOptions.CHECKPOINTING_INTERVAL)
+			.ifPresent(i -> this.setCheckpointInterval(i.toMillis()));
+		configuration.getOptional(ExecutionCheckpointingOptions.CHECKPOINTING_TIMEOUT)
+			.ifPresent(t -> this.setCheckpointTimeout(t.toMillis()));
+		configuration.getOptional(ExecutionCheckpointingOptions.MAX_CONCURRENT_CHECKPOINTS)
+			.ifPresent(this::setMaxConcurrentCheckpoints);
+		configuration.getOptional(ExecutionCheckpointingOptions.MIN_PAUSE_BETWEEN_CHECKPOINTS)
+			.ifPresent(m -> this.setMinPauseBetweenCheckpoints(m.toMillis()));
+		configuration.getOptional(ExecutionCheckpointingOptions.PREFER_CHECKPOINT_FOR_RECOVERY)
+			.ifPresent(this::setPreferCheckpointForRecovery);
+		configuration.getOptional(ExecutionCheckpointingOptions.TOLERABLE_FAILURE_NUMBER)
+			.ifPresent(this::setTolerableCheckpointFailureNumber);
+		configuration.getOptional(ExecutionCheckpointingOptions.EXTERNALIZED_CHECKPOINT)
+			.ifPresent(this::enableExternalizedCheckpoints);
+		configuration.getOptional(ExecutionCheckpointingOptions.ENABLE_UNALIGNED)
+			.ifPresent(this::enableUnalignedCheckpoints);
+		configuration.getOptional(ExecutionCheckpointingOptions.ALIGNMENT_TIMEOUT)
+			.ifPresent(timeout -> setAlignmentTimeout(timeout.toMillis()));
 	}
 }
